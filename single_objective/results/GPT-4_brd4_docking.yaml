@@ -2347,7 +2347,7 @@ Cc1nn(C)cc1CNC(=O)c1ccc(Cn2cc(Cl)c([N+](=O)[O-])n2)cc1:
 COc1ccc(C(=O)N2C[C@@H](C)[NH2+]C[C@H]2C)cc1O:
 - -0.0
 - 47
-[NH3+]C[C@H](CO)Cc1cc(F)cc(Br)c1:
+'[NH3+]C[C@H](CO)Cc1cc(F)cc(Br)c1':
 - -0.0
 - 53
 C#CCN(CC(=O)[O-])C(=O)c1nc(CC)n[n-]1:

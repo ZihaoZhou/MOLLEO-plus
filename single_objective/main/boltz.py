@@ -18,7 +18,7 @@ yaml.add_representer(SingleQuoted, single_quoted_representer)
     
 def calculate_boltz(protein_name, ligand):
     if protein_name == "c-met":
-        protein_sequence = "XIDLSALNPELVQAVQHVVIGPSSLIVHFNEVIGRGHFGCVYHGTLLDNDGKKIHCAVKSLNRITDIGEVSQFLTEGIIMKDFSXPNVLSLLGICLRSEGSPLVVLPYMKHGDLRNFIRNETHNPTVKDLIGFGLQVAKGMKYLASKKFVXRDLAARNCMLDEKFTVKVAXFGLARDMYDKEYYSVXNKTGAKLPVKWMALESLQTQKFTTKSDVWSFGVLLWELMTRGAPPYPDVNTFDITVYLLQGRRLLQPEYCPDPLYEVMLKCWXPKAEMRPSFSELVSRISAIFSTFIG"
+        protein_sequence = "HIDLSALNPELVQAVQHVVIGPSSLIVHFNEVIGRGHFGCVYHGTLLDNDGKKIHCAVKSLNRITDIGEVSQFLTEGIIMKDFSXPNVLSLLGICLRSEGSPLVVLPYMKHGDLRNFIRNETHNPTVKDLIGFGLQVAKGMKYLASKKFVXRDLAARNCMLDEKFTVKVAXFGLARDMYDKEYYSVXNKTGAKLPVKWMALESLQTQKFTTKSDVWSFGVLLWELMTRGAPPYPDVNTFDITVYLLQGRRLLQPEYCPDPLYEVMLKCWXPKAEMRPSFSELVSRISAIFSTFIG"
     elif protein_name == "brd4":
         protein_sequence = "SHMEQLKCCSGILKEMFAKKHAAYAWPFYKPVDVEALGLHDYCDIIKHPMDMSTIKSKLEAREYRDAQEFGADVRLMFSNCYKYNPPDHEVVAMARKLQDVFEMRFAKM"
     else:
@@ -79,6 +79,7 @@ def calculate_boltz(protein_name, ligand):
         }
         
     try:
+        print(protein_name)
         ligand = re.sub(r'[\\/:\*\?"<>\|]', '_', ligand)
         name = f"{protein_name}_{ligand}"
         output_file = f"/data/boltz/inputs/{name}.yaml" 
@@ -99,7 +100,7 @@ def calculate_boltz(protein_name, ligand):
         subprocess.run(boltz_command.split(), env=new_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         if not msa_exists:
-            move_command = f"mv /data/boltz/results/boltz_results_{name}/msa/{name}_0.csv /data/boltz/msa/{protein_name}.csv"
+            move_command = f"cp /data/boltz/results/boltz_results_{name}/msa/{name}_0.csv /data/boltz/msa/{protein_name}.csv"
             subprocess.run(move_command.split())
         
         if not os.path.isfile(f"/data/boltz/results/boltz_results_{name}/predictions/{name}/affinity_{name}.json"):
@@ -113,7 +114,7 @@ def calculate_boltz(protein_name, ligand):
         if not os.path.isfile(f"/data/boltz/results/boltz_results_{name}/predictions/{name}/{name}_model_0.pdb"):
             h_bonds = 0
         else:
-            move_command = f"mv /data/boltz/results/boltz_results_{name}/predictions/{name}/{name}_model_0.pdb /home/andrew/boltz_pose.pdb"
+            move_command = f"cp /data/boltz/results/boltz_results_{name}/predictions/{name}/{name}_model_0.pdb /home/andrew/boltz_pose.pdb"
             subprocess.run(move_command.split())
             chimerax_command = f"chimerax --offscreen --script vis_{protein_name}.cxc --exit"
             result = subprocess.run(chimerax_command.split(), cwd="/home/andrew", capture_output=True, text=True)

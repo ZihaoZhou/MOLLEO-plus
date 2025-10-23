@@ -76,9 +76,14 @@ class GPT4:
         self.oracle = oracle
         self.current_summary = ""
 
-    def edit(self, mating_tuples, mutation_rate):
+    def edit(self, mating_tuples, mutation_rate, target):
         task = self.task
-        protein = "c-MET"
+        if target == "c-met":
+            protein = "c-MET"
+        elif target == "brd4":
+            protein = "BRD4"
+        else:
+            raise Exception("No target provided")
         
         parent = []
         parent.append(random.choice(mating_tuples))
@@ -86,6 +91,7 @@ class GPT4:
         parent_mol = [t[1] for t in parent]
         parent_scores = [t[0] for t in parent]
         try:
+            # summary
             # if self.current_summary:
             #     task_definition = f'We will collaborate on generating a ligand that can bind to the kinase {protein} with high binding affinity. Provided below is our current accumulated knowledge about the target:\n\n'
             #     summary_prompt = self.current_summary+"\n"
@@ -105,24 +111,36 @@ class GPT4:
             # task_objective = 'First describe what you have learned from the above information. Then propose a new molecule that binds better to '+protein+'. You can either make crossovers and mutations based on the two given molecules or just propose a new molecule based on your knowledge of the protein target. Ensure that your generation is unique from the two input molecules. Follow this exact format for your final answer, character by character: \\box{MOLECULE}, where MOLECULE is your proposed ligand in SMILES format.'
             # prompt += task_objective
             
-            if self.current_summary:
-                context = f"First analyze this summary of our current knowledge of {protein}: \n\n" + self.current_summary + "\n\n"
-                task_definition = f"I have two molecules and their docking scores to {protein}. The docking score measures how well a molecule binds to {protein}. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n"
-                task_objective = f'Please propose a new molecule that binds better to {protein}. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n'
-                mol_tuple = ''
-                for i in range(2):
-                    tu = '\n[' + Chem.MolToSmiles(parent_mol[i]) + ',' + str(-parent_scores[i]) + ']'
-                    mol_tuple = mol_tuple + tu
-                prompt = context + task_definition + mol_tuple + task_objective + self.requirements
-            else:
-                task_definition = f"I have two molecules and their docking scores to {protein}. The docking score measures how well a molecule binds to {protein}. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n"
-                task_objective = f'Please propose a new molecule that binds better to {protein}. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n'
-                mol_tuple = ''
-                for i in range(2):
-                    tu = '\n[' + Chem.MolToSmiles(parent_mol[i]) + ',' + str(-parent_scores[i]) + ']'
-                    mol_tuple = mol_tuple + tu
-                prompt = task_definition + mol_tuple + task_objective + self.requirements
-                     
+            # if self.current_summary:
+            #     context = f"First analyze this summary of our current knowledge of {protein}: \n\n" + self.current_summary + "\n\n"
+            #     task_definition = f"I have two molecules and their docking scores to {protein}. The docking score measures how well a molecule binds to {protein}. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n"
+            #     task_objective = f'Please propose a new molecule that binds better to {protein}. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n'
+            #     mol_tuple = ''
+            #     for i in range(2):
+            #         tu = '\n[' + Chem.MolToSmiles(parent_mol[i]) + ',' + str(-parent_scores[i]) + ']'
+            #         mol_tuple = mol_tuple + tu
+            #     prompt = context + task_definition + mol_tuple + task_objective + self.requirements
+            # else:
+            
+            #no summary
+            task_definition = f"We will collaborate on generating a ligand for {protein} with high binding affinity. I will give you the output from docking software after each of your attempts. Assume that there are always more improvements to be made to the current ligand.\n"
+            prompt = task_definition + "Provided are two existing molecules and their binding affinities to c-MET:\n"
+            mol_tuple = ''
+            for i in range(2):
+                tu = '[' + Chem.MolToSmiles(parent_mol[i], canonical=True) + ',' + str(-parent_scores[i]) + ']\n'
+                mol_tuple = mol_tuple + tu
+            prompt += mol_tuple
+            prompt += "First describe what you have learned from the above information. Then propose a new molecule that binds better to "+protein+". You can either make crossovers and mutations based on the two given molecules or just propose a new molecule based on your knowledge of the protein target. Ensure that your generation is unique from the two input molecules. Follow this exact format for your final answer, character by character: \\box{MOLECULE}, where MOLECULE is your proposed ligand in SMILES format."
+            
+            #original prompt
+            # task_definition = f"I have two molecules and their docking scores to {protein}. The docking score measures how well a molecule binds to {protein}. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n"
+            # task_objective = f'Please propose a new molecule that binds better to {protein}. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n'
+            # mol_tuple = ''
+            # for i in range(2):
+            #     tu = '\n[' + Chem.MolToSmiles(parent_mol[i]) + ',' + str(-parent_scores[i]) + ']'
+            #     mol_tuple = mol_tuple + tu
+            # prompt = task_definition + mol_tuple + task_objective + self.requirements
+                    
             print("Prompt: " + prompt, flush=True)
             messages = [{"role": "user", "content": prompt}]
             r = query_LLM(messages)
@@ -136,12 +154,12 @@ class GPT4:
             score = self.oracle(proposed_smiles)
             new_child = Chem.MolFromSmiles(proposed_smiles)
             
-            messages.append({"role": "assistant", "content": r})
-            summary_prompt = "Software shows that the ligand you generated ("+proposed_smiles+") had a binding affinity of "+str(-score)+" kcal/mol.\n"
-            summary_prompt += f"Update our current accumulated knowledge about {protein}. Briefly summarize the most important details and information about the binding target that we've learned so far. Remember that a more negative binding affinity is better. Disregard the previous output format, and do NOT generate any new molecules at this time."
-            messages.append({"role": "user", "content": summary_prompt})
-            summary = query_LLM(messages)
-            self.current_summary = summary.replace("assistant\n\n", "")
+            # messages.append({"role": "assistant", "content": r})
+            # summary_prompt = "Software shows that the ligand you generated ("+proposed_smiles+") had a binding affinity of "+str(-score)+" kcal/mol.\n"
+            # summary_prompt += f"Update our current accumulated knowledge about {protein}. Briefly summarize the most important details and information about the binding target that we've learned so far. Remember that a more negative binding affinity is better. Disregard the previous output format, and do NOT generate any new molecules at this time."
+            # messages.append({"role": "user", "content": summary_prompt})
+            # summary = query_LLM(messages)
+            # self.current_summary = summary.replace("assistant\n\n", "")
 
             return (new_child, score)
         except Exception as e:
@@ -159,12 +177,12 @@ class GPT4:
                 score = self.oracle(smiles)
                 new_child = Chem.MolFromSmiles(smiles)
                 
-                messages.append({"role": "assistant", "content": smiles})
-                summary_prompt = "Software shows that the ligand "+smiles+" has a binding affinity of "+str(-score)+" kcal/mol.\n"
-                summary_prompt += f"Based on this docking result, update our current accumulated knowledge about {protein}. Briefly summarize the most important details and information about the binding target that we've learned so far. Remember that a more negative binding affinity is better. Disregard the previous output format, and do NOT generate any new molecules at this time."
-                messages.append({"role": "user", "content": summary_prompt})
-                summary = query_LLM(messages)
-                self.current_summary = summary.replace("assistant\n\n", "")
+                # messages.append({"role": "assistant", "content": smiles})
+                # summary_prompt = "Software shows that the ligand "+smiles+" has a binding affinity of "+str(-score)+" kcal/mol.\n"
+                # summary_prompt += f"Based on this docking result, update our current accumulated knowledge about {protein}. Briefly summarize the most important details and information about the binding target that we've learned so far. Remember that a more negative binding affinity is better. Disregard the previous output format, and do NOT generate any new molecules at this time."
+                # messages.append({"role": "user", "content": summary_prompt})
+                # summary = query_LLM(messages)
+                # self.current_summary = summary.replace("assistant\n\n", "")
             return (new_child, score)
 
 def sanitize_smiles(smi):

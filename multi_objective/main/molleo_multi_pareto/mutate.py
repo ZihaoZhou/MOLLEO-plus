@@ -113,9 +113,9 @@ def mutate(mol, mutation_rate, mol_lm=None, net=None):
         #for m in mols[0]:
         for m in mols:
             if m != None:# and co.mol_ok(m) and co.ring_OK(m):
-                smi = [Chem.MolToSmiles(m)]
-                fp_score = get_fp_scores(smi, Chem.MolToSmiles(mol))[0]
-                print("original mol", Chem.MolToSmiles(mol))
+                smi = [Chem.MolToSmiles(m, canonical=True)]
+                fp_score = get_fp_scores(smi, Chem.MolToSmiles(mol, canonical=True))[0]
+                print("original mol", Chem.MolToSmiles(mol, canonical=True))
                 print("smiles being considered", smi)
                 print("fp_scores", fp_score)
                 T=0.4
@@ -123,7 +123,7 @@ def mutate(mol, mutation_rate, mol_lm=None, net=None):
                 new_mols.append(m)
         if len(new_mols) > 0:
             if net != None:
-                smi_list = [Chem.MolToSmiles(m) for m in new_mols]
+                smi_list = [Chem.MolToSmiles(m, canonical=True) for m in new_mols]
                 preds = obtain_model_pred(smi_list, net).squeeze()
                 print("NN preds", preds)
                 if preds >= 0.5:
@@ -134,8 +134,8 @@ def mutate(mol, mutation_rate, mol_lm=None, net=None):
             return np.random.choice(new_mols)
 
     if random.random() > mutation_rate:
-        #return mol
-        return None
+        return mol
+        # return None
 
     p = [0.15, 0.14, 0.14, 0.14, 0.14, 0.14, 0.15]
     for i in range(10):

@@ -81,7 +81,7 @@ class GB_GA_Optimizer(BaseOptimizer):
         if args.mol_lm == "GPT-4":
             self.mol_lm = GPT4(self.oracle)
         elif args.mol_lm == "custom":
-            model_path = "/home/ubuntu/LLaMA-Factory/output/llama3_sft_ppo_1200"
+            model_path = "/home/ubuntu/LLaMA-Factory/output/llama3_8b_sft_brd4_overfit"
             # model_path = "meta-llama/Llama-3.1-8B-Instruct"
             print("Model: " + model_path)
             self.mol_lm = Custom_LLM(model_path, self.oracle)
@@ -127,7 +127,7 @@ class GB_GA_Optimizer(BaseOptimizer):
             fp_scores = []
             offspring_mol_temp = []
             if self.args.mol_lm == "GPT-4" or self.args.mol_lm == "custom":
-                offspring_mol_pairs = [self.mol_lm.edit(mating_tuples, config["mutation_rate"]) for _ in range(config["offspring_size"])]
+                offspring_mol_pairs = [self.mol_lm.edit(mating_tuples, config["mutation_rate"], self.oracle.evaluator) for _ in range(config["offspring_size"])]
                 # add new_population
                 offspring_mol, offspring_scores = zip(*offspring_mol_pairs)
                 offspring_mol = list(offspring_mol)

@@ -251,7 +251,7 @@ class BaseOptimizer:
             # print(data)
             # self.all_smiles = data.get_data()['smiles'].tolist()
             self.all_smiles = []
-            with open("data/RAG_sample.txt", "r") as file:
+            with open(f"data/{args.oracles[0]}.txt", "r") as file:
                 for line in file:
                     ligand = line[:-1]
                     self.all_smiles.append(ligand)

@@ -133,7 +133,7 @@ class Oracle:
                     n_calls = self.max_oracle_calls
             else:
                 # Otherwise, log the input moleucles
-                smis = [Chem.MolToSmiles(m) for m in mols]
+                smis = [Chem.MolToSmiles(m, canonical=True) for m in mols]
                 n_calls = len(self.mol_buffer)
 
         # Uncomment this line if want to log top-10 moelucles figures, so as the best_mol key values.
@@ -188,7 +188,7 @@ class Oracle:
         if mol is None or len(smi) == 0:
             return 0
         else:
-            smi = Chem.MolToSmiles(mol)
+            smi = Chem.MolToSmiles(mol, canonical=True)
             if smi in self.mol_buffer:
                 pass
             else:
@@ -251,7 +251,7 @@ class BaseOptimizer:
         for mol in mol_list:
             if mol is not None:
                 try:
-                    smiles = Chem.MolToSmiles(mol)
+                    smiles = Chem.MolToSmiles(mol, canonical=True)
                     if smiles is not None and smiles not in smiles_set:
                         smiles_set.add(smiles)
                         new_mol_list.append(mol)
@@ -323,11 +323,11 @@ class BaseOptimizer:
         torch.manual_seed(seed)
         random.seed(seed)
         self.seed = seed 
-        self.oracle.task_label = self.args.mol_lm + "_" + str(self.args.max_obj) + '_' + str(self.args.min_obj) + str(seed)
+        self.oracle.task_label = self.args.run_name + "_" + str(seed) if seed!=0 else self.args.run_name
         self._optimize(config)
         if self.args.log_results:
             self.log_result()
-        self.save_result(self.args.mol_lm + "_" + str(self.args.max_obj) + '_' + str(self.args.min_obj) + str(seed))
+        self.save_result(self.oracle.task_label)
         self.reset()
 
 

@@ -6,24 +6,24 @@ import yaml
 import os
 import sys
 sys.path.append(os.path.realpath(__file__))
-from tdc import Oracle
+# from tdc import Oracle
 from time import time 
 
 def main():
     start_time = time() 
     parser = argparse.ArgumentParser()
-    parser.add_argument('method', default='molleo_multi')
+    parser.add_argument('method', default='molleo_multi_pareto')
     parser.add_argument('--smi_file', default=None)
     parser.add_argument('--config_default', default='hparams_default.yaml')
     parser.add_argument('--config_tune', default='hparams_tune.yaml')
     parser.add_argument('--pickle_directory', help='Directory containing pickle files with the distribution statistics', default=None)
     parser.add_argument('--n_jobs', type=int, default=-1)
-    parser.add_argument('--output_dir', type=str, default=None)
-    parser.add_argument('--mol_lm', type=str, default=None, choices=[None, "BioT5", "MoleculeSTM", "GPT-4"])
+    parser.add_argument('--output_dir', type=str, default='./results')
+    parser.add_argument('--mol_lm', type=str, default=None, choices=[None, "BioT5", "MoleculeSTM", "GPT-4", "custom"])
     parser.add_argument('--bin_size', type=int, default=100)
     parser.add_argument('--patience', type=int, default=5)
-    parser.add_argument('--max_oracle_calls', type=int, default=10000)
-    parser.add_argument('--freq_log', type=int, default=100)
+    parser.add_argument('--max_oracle_calls', type=int, default=1000)
+    parser.add_argument('--freq_log', type=int, default=10)
     # parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--seed', type=int, nargs="+", default=[0])
     parser.add_argument('--max_obj', nargs="+", default=["jnk3"]) ### 
@@ -31,6 +31,7 @@ def main():
     parser.add_argument('--task_mode', type=str, default='1')
     parser.add_argument('--log_results', action='store_true')
     parser.add_argument('--log_dir', default="./results")
+    parser.add_argument('--run_name', required=True)
     args = parser.parse_args()
 
 
@@ -65,9 +66,9 @@ def main():
     print(f'Optimizing oracle function: {args.max_obj}')
     print(f'Optimizing oracle function: {args.min_obj}')
 
-    if args.max_obj == ['jnk3', 'qed'] and args.min_obj == ['sa']:
+    if args.max_obj == ['qed'] and args.min_obj == ['c-met', 'sa']:
         args.task_mode = '1'
-    elif args.max_obj == ['gsk3', 'qed'] and args.min_obj == ['sa']:
+    elif args.max_obj == ['qed'] and args.min_obj == ['brd4', 'sa']:
         args.task_mode = '2'
     elif args.max_obj == ['jnk3', 'qed'] and args.min_obj == ['sa', 'gsk3b', 'drd2']:
         args.task_mode = '3'

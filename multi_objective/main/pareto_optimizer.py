@@ -5,10 +5,16 @@ import torch
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import Draw
+from rdkit.Chem import QED
 import tdc
 from tdc.generation import MolGen
 from main.utils.chem import *
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
+from .boltz import calculate_boltz
+
+from rdkit.Chem import RDConfig
+sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
+import sascorer
 
 class Objdict(dict):
     def __getattr__(self, name):
@@ -67,6 +73,8 @@ class Oracle:
         self.sa_scorer = tdc.Oracle(name = 'SA')
         self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
         self.last_log = 0
+        
+        self.boltz_cache = {}
 
     @property
     def budget(self):
@@ -77,22 +85,55 @@ class Oracle:
         self.max_evaluator = []
         self.min_evaluator = []
         for idx in range(len(self.max_obj)):
-            eva = tdc.Oracle(name = self.max_obj[idx])
-            self.max_evaluator.append(eva)
+            if self.max_obj[idx] == "qed":
+                self.max_evaluator.append(("qed", QED.qed))
+            # eva = tdc.Oracle(name = self.max_obj[idx])
+            # self.max_evaluator.append(eva)
         
         for idx in range(len(self.min_obj)):
-            eva = tdc.Oracle(name = self.min_obj[idx])
-            self.min_evaluator.append(eva)
+            if self.min_obj[idx] == "sa":
+                self.min_evaluator.append(("sa", sascorer.calculateScore))
+            elif self.min_obj[idx] == "c-met":
+                self.min_evaluator.append(("c-met", calculate_boltz))
+            elif self.min_obj[idx] == "brd4":
+                self.min_evaluator.append(("brd4", calculate_boltz))
+            # eva = tdc.Oracle(name = self.min_obj[idx])
+            # self.min_evaluator.append(eva)
 
     def evaluate(self, smi):
+        print('\n'+smi)
         score = 0
-        for eva in self.max_evaluator:
-            score = score + eva(smi)
-        for eva in self.min_evaluator:
-            if eva.name == 'sa':
-                score = score + (1 - ((eva(smi) - 1)/9))
+        results = {}
+        for eva_tuple in self.max_evaluator:
+            eva_name = eva_tuple[0] 
+            eva = eva_tuple[1]
+            if eva_name == 'qed':
+                mol = Chem.MolFromSmiles(smi)
+                evaluation = eva(mol)
+                score = score + evaluation
             else:
-                score = score + (1 - eva(smi))
+                evaluation = eva(smi)
+                score = score + evaluation
+            results[eva_name] = evaluation
+        for eva_tuple in self.min_evaluator:
+            eva_name = eva_tuple[0]
+            eva = eva_tuple[1]
+            if eva_name == 'sa':
+                mol = Chem.MolFromSmiles(smi)
+                evaluation = eva(mol)
+                score = score + (1 - ((evaluation - 1)/9))
+            elif eva_name == "c-met" or eva_name == "brd4":
+                scale = 1
+                if smi in self.boltz_cache:
+                    evaluation = self.boltz_cache[smi]
+                else:
+                    evaluation = eva(eva_name, smi)
+                score = score + -scale * evaluation
+                self.boltz_cache[smi] = evaluation
+            results[eva_name] = evaluation
+        for name in results:
+            print(f"{name}: {str(results[name])}")
+        print(f"Score: " + str(score))
         return score
 
     def sort_buffer(self):
@@ -110,8 +151,11 @@ class Oracle:
             output_file_path = os.path.join(self.args.output_dir, 'results_' + suffix + '.yaml')
 
         self.sort_buffer()
+        new_buffer = {}
+        for smiles in self.mol_buffer:
+            new_buffer[smiles] = [self.boltz_cache[smiles], self.mol_buffer[smiles][1]]
         with open(output_file_path, 'w') as f:
-            yaml.dump(self.mol_buffer, f, sort_keys=False)
+            yaml.dump(new_buffer, f, sort_keys=False)
 
     def log_intermediate(self, mols=None, scores=None, finish=False):
 
@@ -122,12 +166,12 @@ class Oracle:
             n_calls = self.max_oracle_calls
         else:
             if mols is None and scores is None:
-                if len(self.storing_buffer) <= self.max_oracle_calls:
+                if len(self.mol_buffer) <= self.max_oracle_calls:
                     # If not spefcified, log current top-100 mols in buffer
                     temp_top100 = list(self.mol_buffer.items())[:100]
                     smis = [item[0] for item in temp_top100]
                     scores = [item[1][0] for item in temp_top100]
-                    n_calls = len(self.storing_buffer)
+                    n_calls = len(self.mol_buffer)
                 else:
                     results = list(sorted(self.mol_buffer.items(), key=lambda kv: kv[1][1], reverse=False))[:self.max_oracle_calls]
                     temp_top100 = sorted(results, key=lambda kv: kv[1][0], reverse=True)[:100]
@@ -136,7 +180,7 @@ class Oracle:
                     n_calls = self.max_oracle_calls
             else:
                 # Otherwise, log the input moleucles
-                smis = [Chem.MolToSmiles(m) for m in mols]
+                smis = [Chem.MolToSmiles(m, canonical=True) for m in mols]
                 n_calls = len(self.mol_buffer)
         
         # Uncomment this line if want to log top-10 moelucles figures, so as the best_mol key values.
@@ -191,7 +235,7 @@ class Oracle:
         if mol is None or len(smi) == 0:
             return 0
         else:
-            smi = Chem.MolToSmiles(mol)
+            # smi = Chem.MolToSmiles(mol, canonical=True)
             if smi in self.mol_buffer:
                 pass
             else:
@@ -206,7 +250,7 @@ class Oracle:
             score_list = []
             for smi in smiles_lst:
                 score_list.append(self.score_smi(smi))
-                
+            print("Current buffer: " + str(self.mol_buffer)) 
             self.sort_buffer()
             self.log_intermediate()
             self.last_log = len(self.mol_buffer)
@@ -225,27 +269,49 @@ class Oracle:
             score_list = []
             for smi in smiles_lst:
                 single_score = []
-                for eva in self.max_evaluator:
-                    single_score.append(1 - eva(smi))
-                for eva in self.min_evaluator:
-                    if eva.name == 'sa':
-                        score = ((eva(smi) - 1)/9)
-                        single_score.append(score)
+                for eva_tuple in self.max_evaluator:
+                    eva_name = eva_tuple[0] 
+                    eva = eva_tuple[1]
+                    if eva_name == 'qed':
+                        mol = Chem.MolFromSmiles(smi)
+                        single_score.append(1 - eva(mol))
                     else:
-                        single_score.append(eva(smi))
+                        single_score.append(1 - eva(smi))
+                for eva_tuple in self.min_evaluator:
+                    eva_name = eva_tuple[0]
+                    eva = eva_tuple[1]
+                    if eva_name == 'sa':
+                        mol = Chem.MolFromSmiles(smi)
+                        single_score.append((eva(mol) - 1)/9)
+                    elif eva_name == "c-met" or eva_name == "brd4":
+                        if smi in self.boltz_cache:
+                            boltz = self.boltz_cache[smi]
+                        else:
+                            boltz = eva(eva_name, smi)
+                        self.boltz_cache[smi] = boltz
+                        single_score.append(boltz)
                 score_list.append(single_score)
+                if smi not in self.mol_buffer.keys() and len(self.mol_buffer) <= self.max_oracle_calls:
+                    self.mol_buffer[smi] = [float(self.evaluate(smi)), len(self.mol_buffer)+1]
+                    print("SMILES: " + smi)
+                    print("New buffer length: " + str(len(self.mol_buffer)))
+                else:
+                    print("SMILES: " + smi)
             score_array = np.array(score_list)
             nds = NonDominatedSorting().do(score_array, only_non_dominated_front=True)
             pareto_front = np.array(smiles_lst)[nds]
-            pareto_front_mol = [Chem.MolFromSmiles(smi) for smi in list(pareto_front)]
-            return pareto_front_mol
+            pareto_front_smiles = list(pareto_front)
+            print("Pareto front length: " + str(len(pareto_front_smiles)))
+            return pareto_front_smiles
         else:
             print('Smiles should be in the list format.')
 
 
     @property
     def finish(self):
-        return len(self.storing_buffer) >= self.max_oracle_calls
+        print("Length of buffer: " + str(len(self.mol_buffer)))
+        print("Max oracle calls: " + str(self.max_oracle_calls))
+        return len(self.mol_buffer) >= self.max_oracle_calls
 
 
 class BaseOptimizer:
@@ -271,19 +337,20 @@ class BaseOptimizer:
     #     with open(file_name) as f:
     #         return self.pool(delayed(canonicalize)(s.strip()) for s in f)
             
-    def sanitize(self, mol_list):
-        new_mol_list = []
+    def sanitize(self, smiles_list):
+        new_smiles_list = []
         smiles_set = set()
-        for mol in mol_list:
-            if mol is not None:
+        for smiles in smiles_list:
+            if smiles is not None:
                 try:
-                    smiles = Chem.MolToSmiles(mol)
+                    mol = Chem.MolFromSmiles(smiles)
+                    smiles = Chem.MolToSmiles(mol, canonical=True)
                     if smiles is not None and smiles not in smiles_set:
                         smiles_set.add(smiles)
-                        new_mol_list.append(mol)
+                        new_smiles_list.append(smiles)
                 except ValueError:
                     print('bad smiles')
-        return new_mol_list
+        return new_smiles_list
         
     def sort_buffer(self):
         self.oracle.sort_buffer()
@@ -323,10 +390,12 @@ class BaseOptimizer:
             output_file_path = os.path.join(self.args.output_dir, 'results_' + suffix + '.yaml')
 
         self.sort_buffer()
+        new_buffer = {}
+        for smiles in self.oracle.mol_buffer:
+            new_buffer[smiles] = [self.oracle.boltz_cache[smiles], self.oracle.mol_buffer[smiles][1]]
         with open(output_file_path, 'w') as f:
-            yaml.dump(self.mol_buffer, f, sort_keys=False)
+            yaml.dump(new_buffer, f, sort_keys=False)
     
-
 
     def reset(self):
         del self.oracle
@@ -336,7 +405,6 @@ class BaseOptimizer:
     def mol_buffer(self):
         return self.oracle.mol_buffer
 
-    @property
     def finish(self):
         return self.oracle.finish
         
@@ -350,10 +418,10 @@ class BaseOptimizer:
         torch.manual_seed(seed)
         random.seed(seed)
         self.seed = seed 
-        self.oracle.task_label = self.args.mol_lm + "_" + str(self.args.max_obj) + '_' + str(self.args.min_obj) + str(seed)
+        self.oracle.task_label = self.args.run_name + "_" + str(seed) if seed!=0 else self.args.run_name
         self._optimize(config)
         if self.args.log_results:
             self.log_result()
-        self.save_result(self.args.mol_lm + "_" + str(self.args.max_obj) + '_' + str(self.args.min_obj) + str(seed))
+        self.save_result(self.oracle.task_label)
         self.reset()
 

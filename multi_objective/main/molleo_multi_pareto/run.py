@@ -62,7 +62,7 @@ def reproduce(mating_tuples, mutation_rate, mol_lm=None, net=None):
 
 def get_best_mol(population_scores, population_mol):
     top_mol = population_mol[np.argmax(population_scores)]
-    top_smi = Chem.MolToSmiles(top_mol)
+    top_smi = Chem.MolToSmiles(top_mol, canonical=True)
     return top_smi
 
 class GB_GA_Optimizer(BaseOptimizer):
@@ -76,7 +76,7 @@ class GB_GA_Optimizer(BaseOptimizer):
             self.mol_lm = GPT4()
         elif args.mol_lm == "BioT5":
             self.mol_lm = BioT5()
-
+        
         self.args = args
         lm_name = "baseline"
         if args.mol_lm != None:
@@ -98,8 +98,8 @@ class GB_GA_Optimizer(BaseOptimizer):
 
         # select initial population
         population_smiles = starting_population
-        population_mol = [Chem.MolFromSmiles(s) for s in population_smiles]
-        population_scores = self.oracle([Chem.MolToSmiles(mol) for mol in population_mol])
+        population_smiles = self.sanitize(population_smiles)
+        population_scores = self.oracle(population_smiles)
 
         patience = 0
 
@@ -110,35 +110,40 @@ class GB_GA_Optimizer(BaseOptimizer):
                 old_score = np.mean([item[1][0] for item in list(self.mol_buffer.items())])
             else:
                 old_score = 0
-
             # new_population
-            mating_tuples = make_mating_pool(population_mol, population_scores, config["population_size"])
-
+            mating_tuples = make_mating_pool(population_smiles, population_scores, config["population_size"])
             
             fp_scores = []
             offspring_mol_temp = []
             if self.args.mol_lm == 'GPT-4':
-                offspring_mol = [self.mol_lm.edit(mating_tuples, config["mutation_rate"]) for _ in range(config["offspring_size"])]
+                setup = ""
+                for eva_tuple in self.oracle.max_evaluator:
+                    setup += eva_tuple[0]
+                    setup += "_"
+                for eva_tuple in self.oracle.min_evaluator:
+                    setup += eva_tuple[0]
+                    setup += "_"
+                offspring_smiles = [self.mol_lm.edit(mating_tuples, config["mutation_rate"], setup[:-1]) for _ in range(config["offspring_size"])]
             elif self.args.mol_lm == 'BioT5':
-                top_smi = get_best_mol(population_scores, population_mol) 
+                top_smi = get_best_mol(population_scores, population_smiles) 
 
                 offspring_mol = [reproduce(mating_tuples, config["mutation_rate"]) for _ in range(config["offspring_size"])]
                 offspring_mol = [item[0] for item in offspring_mol]
                 editted_smi = []
                 for m in offspring_mol:
                     if m != None:
-                        editted_smi.append(Chem.MolToSmiles(m))
+                        editted_smi.append(Chem.MolToSmiles(m, canonical=True))
                 ii = 0
                 idxs = np.argsort(population_scores)[::-1]
                 while len(editted_smi) < self.args.bin_size:
                     if ii == len(idxs):
                         print("exiting while loop before filling up bin..........")
                         break
-                    m = population_mol[idxs[ii]]
+                    m = population_smiles[idxs[ii]]
                     editted_mol = self.mol_lm.edit([m])[0]
 
                     if editted_mol != None:
-                        s = Chem.MolToSmiles(editted_mol)
+                        s = Chem.MolToSmiles(editted_mol, canonical=True)
                         if s != None:
                             print("adding editted molecule!!!")
                             editted_smi.append(s)
@@ -151,23 +156,23 @@ class GB_GA_Optimizer(BaseOptimizer):
                 offspring_mol = [Chem.MolFromSmiles(s) for s in editted_smi]
                 print("len offspring_mol", len(offspring_mol))
 
-            
-
-
             # add new_population
-            population_mol += offspring_mol
-            population_mol = self.sanitize(population_mol)
+            print("Offspring size: " + str(len(offspring_smiles)))
+            population_smiles += offspring_smiles
+            population_smiles = self.sanitize(population_smiles)
             #Pareto optimal set
-            self.oracle.clean_buffer()
-            population_mol = self.oracle.select_pareto_front([Chem.MolToSmiles(mol) for mol in population_mol])
+            # self.oracle.clean_buffer()
+            print("Population size: " + str(len(population_smiles)))
+            population_smiles = self.oracle.select_pareto_front(population_smiles)
             # stats
             old_scores = population_scores
-            population_scores = self.oracle([Chem.MolToSmiles(mol) for mol in population_mol])
-            population_tuples = list(zip(population_scores, population_mol))
+            population_scores = self.oracle(population_smiles)
+            population_tuples = list(zip(population_scores, population_smiles))
             population_tuples = sorted(population_tuples, key=lambda x: x[0], reverse=True)
-            population_mol = [t[1] for t in population_tuples]
+            population_smiles = [t[1] for t in population_tuples]
             population_scores = [t[0] for t in population_tuples]
-
+            print("Population Molecules: " + str(population_smiles))
+            print("Population Scores: " + str(population_scores))
 
             ### early stopping
             if len(self.oracle) > 1:
@@ -184,7 +189,10 @@ class GB_GA_Optimizer(BaseOptimizer):
                     patience = 0
 
                 old_score = new_score
-                
-            if self.finish:
+            
+            print("Length of buffer: " + str(len(self.oracle.mol_buffer)))
+            print("Max oracle calls: " + str(self.oracle.max_oracle_calls))
+            if len(self.oracle.mol_buffer) > self.oracle.max_oracle_calls:
+                print("Finished")
                 break
 
