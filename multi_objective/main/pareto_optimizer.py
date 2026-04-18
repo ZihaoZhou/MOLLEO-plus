@@ -1,4 +1,14 @@
 import os
+import sys
+import time
+import hashlib
+import tarfile
+import tempfile
+import uuid
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+
 import requests
 import yaml
 import random
@@ -17,16 +27,291 @@ from .boltz import calculate_boltz
 from collections import defaultdict
 from torch import multiprocessing as mp
 from queue import Empty
-from kubernetes import client, config
+
+try:
+    import boto3
+except Exception:
+    boto3 = None
+
+try:
+    from boltz.main import process_inputs, MOL_URL, CCD_URL
+except Exception:
+    process_inputs = None
+    MOL_URL = None
+    CCD_URL = None
 
 from rdkit.Chem import RDConfig
 sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
 import sascorer
 
 num_gpus = torch.cuda.device_count()
-API_URL = "https://andrew-boltz-api.nrp-nautilus.io/predict_affinity"
+API_URL = os.environ.get("BOLTZ_GATEWAY_URL", "https://boltz-api.nrp-nautilus.io/predict_affinity")
+OFFSPRING_SIZE = int(os.environ.get("NAUTILUS_ORACLE_WORKERS", "20"))
+REQUEST_TIMEOUT_SEC = int(os.environ.get("BOLTZ_REQUEST_TIMEOUT_SEC", "1800"))
+REQUEST_MAX_RETRIES = int(os.environ.get("BOLTZ_REQUEST_MAX_RETRIES", "6"))
+REQUEST_RETRY_BASE_SEC = float(os.environ.get("BOLTZ_REQUEST_RETRY_BASE_SEC", "2"))
+CLIENT_PREP_MODE = os.environ.get("BOLTZ_CLIENT_PREP_MODE", "1").lower() in ("1", "true", "yes")
+ARTIFACT_BUCKET = os.environ.get("BOLTZ_ARTIFACT_BUCKET") or os.environ.get("S3_BUCKET")
+ARTIFACT_PREFIX = os.environ.get("BOLTZ_ARTIFACT_PREFIX", "molleo-fast-artifacts")
+ARTIFACT_PRESIGN_EXPIRE_SEC = int(os.environ.get("BOLTZ_ARTIFACT_PRESIGN_EXPIRE_SEC", str(24 * 3600)))
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT_URL") or os.environ.get("AWS_ENDPOINT_URL", "")
+S3_REGION = os.environ.get("AWS_REGION", "us-east-1")
+PREP_THREADS = int(os.environ.get("BOLTZ_PREPROCESS_THREADS", "4"))
+MSA_SERVER_URL = os.environ.get("BOLTZ_MSA_SERVER_URL") or os.environ.get(
+    "MSA_PROXY_URL",
+    "http://boltz-msa-proxy.spatiotemporal-decision-making.svc.cluster.local:8000",
+)
+MSA_PAIRING_STRATEGY = os.environ.get("BOLTZ_MSA_PAIRING_STRATEGY", "greedy")
+MAX_MSA_SEQS = int(os.environ.get("BOLTZ_MAX_MSA_SEQS", "8192"))
+USE_MSA_SERVER = os.environ.get("BOLTZ_USE_MSA_SERVER", "1").lower() in ("1", "true", "yes")
+MSA_SERVER_USERNAME = os.environ.get("BOLTZ_MSA_USERNAME")
+MSA_SERVER_PASSWORD = os.environ.get("BOLTZ_MSA_PASSWORD")
+MSA_API_KEY_HEADER = os.environ.get("MSA_API_KEY_HEADER", "X-API-Key")
+MSA_API_KEY_VALUE = os.environ.get("MSA_API_KEY_VALUE")
+MSA_CACHE_PREFIX = os.environ.get("MSA_CACHE_PREFIX", "boltz-msa-cache")
+NIM_MSA_DATABASE = os.environ.get("NIM_MSA_DATABASE", "Uniref30_2302")
+NIM_MSA_TIMEOUT_SEC = int(os.environ.get("NIM_MSA_TIMEOUT_SEC", "180"))
+MOLLEO_BOLTZ_CACHE_DIR = Path(os.environ.get("MOLLEO_BOLTZ_CACHE_DIR", "~/.boltz")).expanduser()
 use_nautilus = True
 use_local = False
+_REQUEST_SESSION = requests.Session()
+if os.environ.get("BOLTZ_USE_ENV_PROXY", "0").lower() not in ("1", "true", "yes"):
+    _REQUEST_SESSION.trust_env = False
+_S3_CLIENT = None
+_ARTIFACT_PAYLOAD_CACHE = {}
+
+PROTEIN_SEQUENCES = {
+    "c-met": "HIDLSALNPELVQAVQHVVIGPSSLIVHFNEVIGRGHFGCVYHGTLLDNDGKKIHCAVKSLNRITDIGEVSQFLTEGIIMKDFSXPNVLSLLGICLRSEGSPLVVLPYMKHGDLRNFIRNETHNPTVKDLIGFGLQVAKGMKYLASKKFVXRDLAARNCMLDEKFTVKVAXFGLARDMYDKEYYSVXNKTGAKLPVKWMALESLQTQKFTTKSDVWSFGVLLWELMTRGAPPYPDVNTFDITVYLLQGRRLLQPEYCPDPLYEVMLKCWXPKAEMRPSFSELVSRISAIFSTFIG",
+    "brd4": "SHMEQLKCCSGILKEMFAKKHAAYAWPFYKPVDVEALGLHDYCDIIKHPMDMSTIKSKLEAREYRDAQEFGADVRLMFSNCYKYNPPDHEVVAMARKLQDVFEMRFAKM",
+}
+
+
+class SingleQuoted(str):
+    pass
+
+
+def _sq_representer(dumper, data):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="'")
+
+
+yaml.add_representer(SingleQuoted, _sq_representer)
+
+
+@dataclass
+class ArtifactPayload:
+    record_id: str
+    artifact_uri: str
+    artifact_sha256: str
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _sha1_text(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()  # noqa: S324
+
+
+def _extract_a3m_sequences(a3m_text: str) -> list[str]:
+    seqs = []
+    for line in a3m_text.splitlines():
+        s = line.strip()
+        if not s or s.startswith(">"):
+            continue
+        seqs.append(s)
+    return seqs
+
+
+def _fetch_proxy_a3m(protein_name: str, sequence: str) -> str:
+    base = (MSA_SERVER_URL or "").strip().rstrip("/")
+    if not base:
+        raise RuntimeError("missing BOLTZ_MSA_SERVER_URL for proxy MSA provider")
+    url = f"{base}/a3m"
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if MSA_API_KEY_VALUE:
+        headers[MSA_API_KEY_HEADER] = MSA_API_KEY_VALUE
+    payload = {
+        "protein_name": protein_name,
+        "sequence": sequence,
+        "database": NIM_MSA_DATABASE,
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=NIM_MSA_TIMEOUT_SEC)
+    if resp.status_code != 200:
+        raise RuntimeError(f"MSA proxy request failed: status={resp.status_code} body={resp.text[:500]}")
+    data = resp.json()
+    a3m = (data.get("a3m") or "").strip()
+    if not a3m:
+        raise RuntimeError("MSA proxy response missing a3m")
+    return a3m
+
+
+def _msa_cache_key(protein_name: str, protein_seq: str) -> str:
+    seq_hash = _sha1_text(protein_seq)[:10]
+    prefix = str(MSA_CACHE_PREFIX).rstrip("/")
+    return f"{prefix}/{protein_name}/proxy/{NIM_MSA_DATABASE}/{seq_hash}.csv"
+
+
+def _get_or_create_shared_msa_csv(protein_name: str) -> Path | None:
+    if not USE_MSA_SERVER:
+        return None
+    protein_seq = PROTEIN_SEQUENCES.get(protein_name)
+    if not protein_seq:
+        return None
+    key = _msa_cache_key(protein_name, protein_seq)
+    local_dir = MOLLEO_BOLTZ_CACHE_DIR / "msa_cache" / protein_name / "proxy" / NIM_MSA_DATABASE
+    local_dir.mkdir(parents=True, exist_ok=True)
+    local = local_dir / Path(key).name
+    if local.exists():
+        return local
+
+    a3m = _fetch_proxy_a3m(protein_name, protein_seq)
+    seqs = _extract_a3m_sequences(a3m)
+    if not seqs:
+        raise RuntimeError("MSA proxy returned empty alignment")
+    seqs = seqs[: max(1, int(MAX_MSA_SEQS))]
+    with local.open("w") as f:
+        f.write("key,sequence\n")
+        for s in seqs:
+            f.write(f"-1,{s}\n")
+    return local
+
+
+def _ensure_mol_assets(cache_dir: Path) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    mol_dir = cache_dir / "mols"
+    tar_mols = cache_dir / "mols.tar"
+    ccd_pkl = cache_dir / "ccd.pkl"
+    if MOL_URL is None:
+        raise RuntimeError("boltz MOL_URL unavailable; cannot bootstrap mol assets")
+    if not mol_dir.exists():
+        if not tar_mols.exists():
+            urllib.request.urlretrieve(MOL_URL, str(tar_mols))  # noqa: S310
+        with tarfile.open(str(tar_mols), "r") as tar:
+            tar.extractall(cache_dir)  # noqa: S202
+    if not ccd_pkl.exists():
+        if CCD_URL is None:
+            raise RuntimeError("boltz CCD_URL unavailable; cannot bootstrap ccd.pkl")
+        urllib.request.urlretrieve(CCD_URL, str(ccd_pkl))  # noqa: S310
+
+
+def _write_input_yaml(protein_name: str, ligand_smiles: str, out_path: Path, msa_path: str | None = None) -> None:
+    protein_seq = PROTEIN_SEQUENCES.get(protein_name)
+    if not protein_seq:
+        raise RuntimeError(f"unsupported protein: {protein_name}")
+    protein_entry = {"protein": {"id": "A", "sequence": protein_seq}}
+    if msa_path:
+        protein_entry["protein"]["msa"] = msa_path
+    data = {
+        "version": 1,
+        "sequences": [
+            protein_entry,
+            {"ligand": {"id": "B", "smiles": SingleQuoted(ligand_smiles)}},
+        ],
+        "properties": [{"affinity": {"binder": "B"}}],
+    }
+    with out_path.open("w") as f:
+        yaml.dump(data, f, sort_keys=False)
+
+
+def _get_s3_client():
+    global _S3_CLIENT
+    if _S3_CLIENT is not None:
+        return _S3_CLIENT
+    if boto3 is None:
+        raise RuntimeError("boto3 is missing; install boto3 for client-prep mode")
+    _S3_CLIENT = boto3.client(
+        "s3",
+        endpoint_url=S3_ENDPOINT or None,
+        region_name=S3_REGION,
+    )
+    return _S3_CLIENT
+
+
+def _prepare_single_artifact(protein_name: str, ligand_smiles: str, experiment_id: str) -> ArtifactPayload:
+    if process_inputs is None:
+        raise RuntimeError("boltz process_inputs unavailable; install boltz in client env")
+    if not ARTIFACT_BUCKET:
+        raise RuntimeError("missing BOLTZ_ARTIFACT_BUCKET (or S3_BUCKET) for client-prep mode")
+    if Chem.MolFromSmiles(ligand_smiles) is None:
+        raise RuntimeError("invalid ligand smiles")
+
+    _ensure_mol_assets(MOLLEO_BOLTZ_CACHE_DIR)
+    shared_msa_csv = _get_or_create_shared_msa_csv(protein_name)
+
+    run_token = f"{int(time.time())}_{uuid.uuid4().hex[:10]}"
+    record_id = f"{experiment_id}_{protein_name}_{_sha1_text(ligand_smiles)[:12]}"
+    with tempfile.TemporaryDirectory(prefix=f"molleo_art_{run_token}_") as tmp:
+        tmp_root = Path(tmp)
+        in_dir = tmp_root / "yaml"
+        out_dir = tmp_root / "prep"
+        in_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        yaml_path = in_dir / f"{record_id}.yaml"
+        _write_input_yaml(
+            protein_name,
+            ligand_smiles,
+            yaml_path,
+            msa_path=str(shared_msa_csv.resolve()) if shared_msa_csv else None,
+        )
+
+        use_msa_server = bool(USE_MSA_SERVER)
+        msa_server_url = MSA_SERVER_URL
+        msa_server_username = MSA_SERVER_USERNAME
+        msa_server_password = MSA_SERVER_PASSWORD
+        api_key_header = MSA_API_KEY_HEADER
+        api_key_value = MSA_API_KEY_VALUE
+        if shared_msa_csv is not None:
+            use_msa_server = False
+            msa_server_url = "local://provided-msa"
+            msa_server_username = None
+            msa_server_password = None
+            api_key_header = None
+            api_key_value = None
+
+        process_inputs(
+            data=[yaml_path],
+            out_dir=out_dir,
+            ccd_path=MOLLEO_BOLTZ_CACHE_DIR / "ccd.pkl",
+            mol_dir=MOLLEO_BOLTZ_CACHE_DIR / "mols",
+            msa_server_url=msa_server_url,
+            msa_pairing_strategy=MSA_PAIRING_STRATEGY,
+            max_msa_seqs=MAX_MSA_SEQS,
+            use_msa_server=use_msa_server,
+            msa_server_username=msa_server_username,
+            msa_server_password=msa_server_password,
+            api_key_header=api_key_header,
+            api_key_value=api_key_value,
+            boltz2=True,
+            preprocessing_threads=max(1, PREP_THREADS),
+        )
+
+        record_json = out_dir / "processed" / "records" / f"{record_id}.json"
+        if not record_json.exists():
+            raise RuntimeError(f"missing processed record for {record_id}")
+
+        tar_path = tmp_root / f"{run_token}.tar.gz"
+        with tarfile.open(tar_path, "w:gz") as tf:
+            tf.add(out_dir / "processed", arcname="processed")
+        artifact_sha = _sha256_file(tar_path)
+
+        artifact_key = f"{ARTIFACT_PREFIX.rstrip('/')}/{experiment_id}/{run_token}.tar.gz"
+        s3 = _get_s3_client()
+        s3.upload_file(str(tar_path), ARTIFACT_BUCKET, artifact_key)
+        artifact_uri = s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": ARTIFACT_BUCKET, "Key": artifact_key},
+            ExpiresIn=ARTIFACT_PRESIGN_EXPIRE_SEC,
+        )
+
+    return ArtifactPayload(record_id=record_id, artifact_uri=artifact_uri, artifact_sha256=artifact_sha)
 
 class Objdict(dict):
     def __getattr__(self, name):
@@ -84,75 +369,64 @@ def tuple_to_score(input_tuple, *args):
     
     return affin + qed + sa
 
-def get_ready_pod_count(namespace, deployment_name):
-
-    try:
-        config.load_kube_config()
-    except config.ConfigException:
-        config.load_incluster_config()
-
-    api_instance = client.AppsV1Api()
-
-    try:
-        deployment = api_instance.read_namespaced_deployment(
-            name=deployment_name,
-            namespace=namespace
-        )
-
-        ready_count = deployment.status.ready_replicas or 0
-        print(f"Deployment: {deployment_name}")
-        print(f"Total Desired: {deployment.status.replicas}")
-        print(f"Ready & Running: {ready_count}")
-        
-        return ready_count
-
-    except client.exceptions.ApiException as e:
-        if e.status == 404:
-            print(f"Error: Deployment '{deployment_name}' not found in namespace '{namespace}'.")
-        else:
-            print(f"API Error: {e}")
-        return 0
-
 def calculate_boltz_nautilus(protein_name, ligand_smiles, idx):
-    print(f"\n[Worker {str(idx)}] Sending job for {ligand_smiles}...", flush=True)
-    
-    query_params = {
+    print(f"\n[Worker {str(idx)}] Sending job for {ligand_smiles[:60]}...", flush=True)
+
+    payload = {
         "protein_name": protein_name,
-        "ligand": ligand_smiles
+        "ligand": ligand_smiles,
+        "experiment_id": os.environ.get("BOLTZ_EXPERIMENT_ID", "molleo_multi"),
     }
-    worker_lifetime = time.time()
-    num_errors = 0
-    while True:
+    if CLIENT_PREP_MODE:
+        cache_key = (protein_name, ligand_smiles)
+        artifact = _ARTIFACT_PAYLOAD_CACHE.get(cache_key)
+        if artifact is None:
+            artifact = _prepare_single_artifact(
+                protein_name=protein_name,
+                ligand_smiles=ligand_smiles,
+                experiment_id=payload["experiment_id"],
+            )
+            _ARTIFACT_PAYLOAD_CACHE[cache_key] = artifact
+        payload["record_id"] = artifact.record_id
+        payload["artifact_uri"] = artifact.artifact_uri
+        payload["artifact_sha256"] = artifact.artifact_sha256
+
+    for attempt in range(1, REQUEST_MAX_RETRIES + 1):
         try:
             before = time.time()
-            response = requests.post(API_URL, params=query_params, headers={'Connection': 'close'})
+            response = _REQUEST_SESSION.post(
+                API_URL,
+                json=payload,
+                headers={"Connection": "close"},
+                timeout=REQUEST_TIMEOUT_SEC,
+            )
             after = time.time()
-            print(response)
             if response.status_code == 200:
                 result = response.json()
-                print(f"\n[Worker {str(idx)}] Success")
-                print(result)
-                print(f"[Worker {str(idx)}]Took: {str(after-before)} seconds", flush=True)
-                time.sleep(3)
-                return result["affinity"]
-            elif response.status_code == 429 or response.status_code == 503:
-                sleep_time = random.uniform(0.5, 2.0)
-                print(f"[Worker {str(idx)}] Busy: Retrying", flush=True)
-                current_lifetime = time.time()
-                if worker_lifetime - current_lifetime > 3600:
-                    print(f"[Worker {str(idx)}] Worker has been stalled for {str(worker_lifetime-current_lifetime)} seconds. Exiting.", flush=True)
-                    return 0
-                time.sleep(sleep_time)
+                status = result.get("status", "unknown")
+                print(f"[Worker {str(idx)}] {status} in {after-before:.1f}s", flush=True)
+                if status == "success":
+                    return result.get("affinity", 0)
+                print(f"[Worker {str(idx)}] Fail: {result.get('error', 'unknown')}", flush=True)
+                return 0
+            if response.status_code in (429, 502, 503, 504):
+                print(
+                    f"[Worker {str(idx)}] transient {response.status_code} "
+                    f"(attempt {attempt}/{REQUEST_MAX_RETRIES})",
+                    flush=True,
+                )
             else:
-                print(f"[Worker {str(idx)}] Error {response.status_code}: {response.text}", flush=True)
-                num_errors += 1
-                if num_errors >= 100:
-                    return 0
-                time.sleep(10)
+                print(f"[Worker {str(idx)}] Error {response.status_code}: {response.text[:200]}", flush=True)
+                return 0
         except Exception as e:
-            print(f"\n[Worker {str(idx)}] Connection failed: {str(e)}", flush=True)        
-            time.sleep(3)
-            return 0
+            print(
+                f"[Worker {str(idx)}] Connection failed (attempt {attempt}/{REQUEST_MAX_RETRIES}): {str(e)}",
+                flush=True,
+            )
+        if attempt < REQUEST_MAX_RETRIES:
+            time.sleep(REQUEST_RETRY_BASE_SEC * attempt)
+    print(f"[Worker {str(idx)}] Exhausted retries", flush=True)
+    return 0
 
 def gpu_worker(gpu_id, task_q, result_q, max_evaluator, min_evaluator, boltz_cache):
     while True:
@@ -239,7 +513,6 @@ class Oracle:
     def parallel_oracle(self, inputs):
         print(inputs)
         print("Number of GPUs available: " + str(num_gpus))
-        assert num_gpus > 0, "No GPUs available"
 
         ctx = mp.get_context("spawn")
         task_q = ctx.Queue()
@@ -258,11 +531,13 @@ class Oracle:
                 num_added += 1
         
         procs = []
-        num_nautilus = get_ready_pod_count("spatiotemporal-decision-making", "andrew-boltz-api")
+        num_nautilus = OFFSPRING_SIZE if use_nautilus else 0
         num_workers = 0
         num_workers += num_gpus if use_local else 0
         num_workers += num_nautilus if use_nautilus else 0
-        print(f"{str(num_workers)} workers available ({str(num_gpus)} local, {str(num_nautilus)} on Nautilus)")
+        if num_workers <= 0:
+            num_workers = max(1, min(len(inputs), 8))
+        print(f"{str(num_workers)} workers available ({str(num_gpus)} local, {str(num_nautilus)} gateway workers)")
         for gpu_id in range(num_workers):
             p = ctx.Process(target=gpu_worker, args=(gpu_id, task_q, result_q, self.max_evaluator, self.min_evaluator, self.boltz_cache))
             p.start()
@@ -733,4 +1008,3 @@ class BaseOptimizer:
             self.log_result()
         self.save_result(self.oracle.task_label)
         self.reset()
-
