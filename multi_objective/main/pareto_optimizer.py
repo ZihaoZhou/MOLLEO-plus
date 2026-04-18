@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import traceback
 import hashlib
 import tarfile
 import tempfile
@@ -58,6 +59,8 @@ OFFSPRING_SIZE = int(os.environ.get("NAUTILUS_ORACLE_WORKERS", "20"))
 REQUEST_TIMEOUT_SEC = int(os.environ.get("BOLTZ_REQUEST_TIMEOUT_SEC", "1800"))
 REQUEST_MAX_RETRIES = int(os.environ.get("BOLTZ_REQUEST_MAX_RETRIES", "6"))
 REQUEST_RETRY_BASE_SEC = float(os.environ.get("BOLTZ_REQUEST_RETRY_BASE_SEC", "2"))
+RESULT_QUEUE_POLL_SEC = int(os.environ.get("MOLLEO_RESULT_QUEUE_POLL_SEC", "15"))
+RESULT_STALL_TIMEOUT_SEC = int(os.environ.get("MOLLEO_RESULT_STALL_TIMEOUT_SEC", "600"))
 CLIENT_PREP_MODE = os.environ.get("BOLTZ_CLIENT_PREP_MODE", "1").lower() in ("1", "true", "yes")
 ARTIFACT_BUCKET = os.environ.get("BOLTZ_ARTIFACT_BUCKET") or os.environ.get("S3_BUCKET")
 ARTIFACT_PREFIX = os.environ.get("BOLTZ_ARTIFACT_PREFIX", "molleo-fast-artifacts")
@@ -437,6 +440,7 @@ def calculate_boltz_nautilus(protein_name, ligand_smiles, idx):
     return 0
 
 def gpu_worker(gpu_id, task_q, result_q, max_evaluator, min_evaluator, boltz_cache):
+    n_scores = len(max_evaluator) + len(min_evaluator)
     while True:
         try:
             idx, smi, val = task_q.get(timeout=3)
@@ -485,8 +489,10 @@ def gpu_worker(gpu_id, task_q, result_q, max_evaluator, min_evaluator, boltz_cac
                     result_q.put((idx, smi, single_score, boltz_scores))
                     if val is None: print(f"GPU {gpu_id} produced result: {str((smi, single_score, boltz_scores))}\n")
             except Exception as e:
-                print(e)
-                sys.exit()
+                print(f"[gpu_worker {gpu_id}] task failed idx={idx} smi={smi}: {e}", flush=True)
+                traceback.print_exc()
+                # Return a deterministic zero score for this task so collector never deadlocks.
+                result_q.put((idx, smi, [0] * n_scores, [0] * n_scores))
         except Empty:
             break
     
@@ -556,8 +562,30 @@ class Oracle:
         results = [None] * len(inputs)
         buffer_length = len(self.mol_buffer)
         num_added = 0
-        for i in range(len(inputs)):
-            idx, x, single_score, boltz_scores = result_q.get()
+        received = 0
+        last_result_ts = time.time()
+        max_wait = max(30, RESULT_STALL_TIMEOUT_SEC)
+        n_scores = len(self.max_evaluator) + len(self.min_evaluator)
+        while received < len(inputs):
+            try:
+                idx, x, single_score, boltz_scores = result_q.get(timeout=RESULT_QUEUE_POLL_SEC)
+                received += 1
+                last_result_ts = time.time()
+            except Empty:
+                alive = sum(1 for p in procs if p.is_alive())
+                stalled_for = time.time() - last_result_ts
+                if alive == 0 or stalled_for >= max_wait:
+                    missing = len(inputs) - received
+                    print(
+                        f"[parallel_oracle] stalled: alive_workers={alive}, "
+                        f"stalled_for={stalled_for:.1f}s, missing={missing}; filling zeros",
+                        flush=True,
+                    )
+                    for j in range(len(inputs)):
+                        if results[j] is None:
+                            results[j] = [0] * n_scores
+                    break
+                continue
             
             # results array
             results[idx] = single_score
@@ -566,15 +594,17 @@ class Oracle:
             boltz_index = 0
             for eva_tuple in self.max_evaluator:
                 if eva_tuple[0] == "c-met" or eva_tuple[0] == "brd4":
-                    self.boltz_cache[eva_tuple[0]][x] = boltz_scores[boltz_index]
-                    boltz_index += 1
+                    if x is not None and boltz_scores is not None and boltz_index < len(boltz_scores):
+                        self.boltz_cache[eva_tuple[0]][x] = boltz_scores[boltz_index]
+                        boltz_index += 1
             for eva_tuple in self.min_evaluator:
                 if eva_tuple[0] == "c-met" or eva_tuple[0] == "brd4":
-                    self.boltz_cache[eva_tuple[0]][x] = boltz_scores[boltz_index]
-                    boltz_index += 1
+                    if x is not None and boltz_scores is not None and boltz_index < len(boltz_scores):
+                        self.boltz_cache[eva_tuple[0]][x] = boltz_scores[boltz_index]
+                        boltz_index += 1
             
             # mol buffer
-            if x not in self.mol_buffer and any(single_score): 
+            if x is not None and x not in self.mol_buffer and single_score is not None and any(single_score):
                 self.mol_buffer[x] = [tuple_to_score(single_score, *self.max_evaluator, *self.min_evaluator), buffer_length+num_added+1]
                 num_added += 1
                 
