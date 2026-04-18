@@ -1,4 +1,12 @@
 .env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+single_objective/perf_runs/
+multi_objective/perf_runs/
 conversation_framework/logs
 multi_objective/logs
 single_objective/logs

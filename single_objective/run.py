@@ -6,7 +6,6 @@ import yaml
 import os
 import sys
 sys.path.append(os.path.realpath(__file__))
-from tdc import Oracle
 from time import time 
 
 def main():
@@ -81,4 +80,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

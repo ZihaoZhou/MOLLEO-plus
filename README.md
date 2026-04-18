@@ -28,10 +28,27 @@ pip install sentencepiece
 pip install selfies
 ```
 
+Note:
+- `PyTDC` is only required when you run oracle paths that depend on it.
+- `single_objective/run.py` no longer imports `tdc` at module import time, so non-TDC paths can start without that package.
+
 Then we can activate conda via following command. 
 ```bash
 conda activate molleo 
 ```
+
+### LLM Endpoint Configuration (GPT-oss path)
+For OpenAI-compatible GPT-oss serving, configure:
+
+```bash
+export MOLLEO_LLM_BASE_URL="https://gpt-oss-120b-andrew.nrp-nautilus.io/v1"
+export OSS_KEY="<client_api_key>"
+```
+
+Auth fallback order in code is:
+- `OSS_KEY`
+- `CLIENT_API_KEY`
+- `OPENAI_API_KEY`
 
 
 ### Experiments
