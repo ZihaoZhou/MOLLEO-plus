@@ -26,8 +26,9 @@ import sascorer
 
 load_dotenv()
 
-# client = OpenAI(api_key=os.getenv("GPT_KEY"))
-client = OpenAI(base_url="https://gpt-oss-120b-svarambally.nrp-nautilus.io/v1", api_key=os.getenv("OSS_KEY"))
+LLM_BASE_URL = os.getenv("MOLLEO_LLM_BASE_URL", "https://gpt-oss-120b-andrew.nrp-nautilus.io/v1")
+LLM_API_KEY = os.getenv("OSS_KEY") or os.getenv("CLIENT_API_KEY")
+client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
 
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Crippen, rdMolDescriptors
