@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import signal
 import traceback
 import hashlib
 import tarfile
@@ -61,6 +62,7 @@ REQUEST_MAX_RETRIES = int(os.environ.get("BOLTZ_REQUEST_MAX_RETRIES", "6"))
 REQUEST_RETRY_BASE_SEC = float(os.environ.get("BOLTZ_REQUEST_RETRY_BASE_SEC", "2"))
 RESULT_QUEUE_POLL_SEC = int(os.environ.get("MOLLEO_RESULT_QUEUE_POLL_SEC", "15"))
 RESULT_STALL_TIMEOUT_SEC = int(os.environ.get("MOLLEO_RESULT_STALL_TIMEOUT_SEC", "600"))
+CLIENT_PREP_TIMEOUT_SEC = int(os.environ.get("BOLTZ_CLIENT_PREP_TIMEOUT_SEC", "180"))
 CLIENT_PREP_MODE = os.environ.get("BOLTZ_CLIENT_PREP_MODE", "1").lower() in ("1", "true", "yes")
 ARTIFACT_BUCKET = os.environ.get("BOLTZ_ARTIFACT_BUCKET") or os.environ.get("S3_BUCKET")
 ARTIFACT_PREFIX = os.environ.get("BOLTZ_ARTIFACT_PREFIX", "molleo-fast-artifacts")
@@ -392,11 +394,35 @@ def calculate_boltz_nautilus(protein_name, ligand_smiles, idx):
         cache_key = (protein_name, ligand_smiles)
         artifact = _ARTIFACT_PAYLOAD_CACHE.get(cache_key)
         if artifact is None:
-            artifact = _prepare_single_artifact(
-                protein_name=protein_name,
-                ligand_smiles=ligand_smiles,
-                experiment_id=payload["experiment_id"],
-            )
+            prep_start = time.time()
+            previous_handler = None
+            try:
+                if CLIENT_PREP_TIMEOUT_SEC > 0:
+                    def _prep_timeout_handler(_signum, _frame):
+                        raise TimeoutError(
+                            f"client-prep timed out after {CLIENT_PREP_TIMEOUT_SEC}s"
+                        )
+                    previous_handler = signal.getsignal(signal.SIGALRM)
+                    signal.signal(signal.SIGALRM, _prep_timeout_handler)
+                    signal.alarm(CLIENT_PREP_TIMEOUT_SEC)
+
+                artifact = _prepare_single_artifact(
+                    protein_name=protein_name,
+                    ligand_smiles=ligand_smiles,
+                    experiment_id=payload["experiment_id"],
+                )
+            except Exception as e:
+                print(
+                    f"[Worker {str(idx)}] client-prep failed for {ligand_smiles[:60]}: {e}",
+                    flush=True,
+                )
+                traceback.print_exc()
+                return 0
+            finally:
+                if CLIENT_PREP_TIMEOUT_SEC > 0:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, previous_handler)
+            print(f"[Worker {str(idx)}] client-prep ok in {time.time()-prep_start:.1f}s", flush=True)
             _ARTIFACT_PAYLOAD_CACHE[cache_key] = artifact
         payload["record_id"] = artifact.record_id
         payload["artifact_uri"] = artifact.artifact_uri
