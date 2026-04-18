@@ -8,6 +8,7 @@ import uuid
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+import types
 
 import requests
 import yaml
@@ -18,6 +19,14 @@ from rdkit import Chem
 from rdkit.Chem import QED
 from rdkit.Chem import AllChem
 from rdkit.Chem import DataStructs
+
+# pytdc currently imports `rdkit.six`, removed in newer RDKit.
+# Provide a minimal shim to keep Oracle/MolGen imports working.
+if "rdkit.six" not in sys.modules:
+    six_mod = types.ModuleType("rdkit.six")
+    six_mod.iteritems = lambda d: d.items()
+    sys.modules["rdkit.six"] = six_mod
+
 import tdc
 from tdc.generation import MolGen
 from main.utils.chem import *
