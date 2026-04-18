@@ -16,11 +16,6 @@ rdBase.DisableLog('rdApp.error')
 import main.molleo.crossover as co, main.molleo.mutate as mu
 from main.optimizer import BaseOptimizer
 
-from main.molleo.mol_lm import MolCLIP
-from main.molleo.biot5 import BioT5
-from main.molleo.GPT4 import GPT4
-from main.molleo.GPToss import GPToss
-from main.molleo.custom_llm import Custom_LLM
 from .utils import get_fp_scores
 from .network import create_and_train_network, obtain_model_pred
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -83,15 +78,19 @@ class GB_GA_Optimizer(BaseOptimizer):
 
         self.mol_lm = None
         if args.mol_lm == "GPT-4":
+            from main.molleo.GPT4 import GPT4
             self.mol_lm = GPT4(self.oracle)
         elif args.mol_lm == "GPT-oss":
+            from main.molleo.GPToss import GPToss
             self.mol_lm = GPToss(self.oracle)
         elif args.mol_lm == "custom":
+            from main.molleo.custom_llm import Custom_LLM
             # model_path = "/home/ubuntu/LLaMA-Factory/output/llama3_8b_sft_brd4"
             model_path = "meta-llama/Llama-3.1-8B-Instruct"
             print("Model: " + model_path)
             self.mol_lm = Custom_LLM(model_path, self.oracle)
         elif args.mol_lm == "BioT5":
+            from main.molleo.biot5 import BioT5
             self.mol_lm = BioT5()
         self.args = args
         self.seed = seed
@@ -229,4 +228,3 @@ class GB_GA_Optimizer(BaseOptimizer):
                 
             if self.finish:
                 break
-
