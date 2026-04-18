@@ -988,19 +988,32 @@ class BaseOptimizer:
         random.seed(seed)
         self.seed = seed 
         self.oracle.task_label = str(seed)
-        
-        # initial boltz values
+
+        # Initial boltz values (optional warm cache): probe configured/local legacy paths.
         if self.seed <= 4:
+            init_roots = []
+            env_root = os.environ.get("MOLLEO_INIT_CACHE_DIR", "").strip()
+            if env_root:
+                init_roots.append(Path(env_root))
+            init_roots.append(Path(__file__).resolve().parents[2] / "init_caches")
+            init_roots.append(Path("/home/ubuntu/MOLLEO/init_caches"))
+
+            def _try_load_init_cache(eva_name: str) -> None:
+                if eva_name not in ("c-met", "brd4"):
+                    return
+                for root in init_roots:
+                    cache_path = root / f"{eva_name}_{self.seed}.yaml"
+                    if cache_path.exists():
+                        with cache_path.open("r") as file:
+                            self.oracle.boltz_cache[eva_name] = yaml.safe_load(file)
+                        print(f"Loaded init cache: {cache_path}")
+                        return
+                print(f"Init cache missing for {eva_name}_{self.seed}; continuing without warm cache")
+
             for eva in self.args.min_obj:
-                if eva == "c-met" or eva == "brd4":
-                    with open(f"/home/ubuntu/MOLLEO/init_caches/{eva}_{str(self.seed)}.yaml", 'r') as file:
-                        self.oracle.boltz_cache[eva] = yaml.safe_load(file)
-                        print(self.oracle.boltz_cache)
+                _try_load_init_cache(eva)
             for eva in self.args.max_obj:
-                if eva == "c-met" or eva == "brd4":
-                    with open(f"/home/ubuntu/MOLLEO/init_caches/{eva}_{str(self.seed)}.yaml", 'r') as file:
-                        self.oracle.boltz_cache[eva] = yaml.safe_load(file)
-                        print(self.oracle.boltz_cache)
+                _try_load_init_cache(eva)
                 
         self._optimize(config)
         if self.args.log_results:
