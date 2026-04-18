@@ -239,7 +239,9 @@ class BaseOptimizer:
 
         self.sa_scorer = tdc.Oracle(name = 'SA')
         self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
-        self.filter = tdc.chem_utils.oracle.filter.MolFilter(filters = ['PAINS', 'SureChEMBL', 'Glaxo'], property_filters_flag = False)
+        # MolFilter is unused in the current optimizer path and can trigger
+        # slow runtime dependency installs inside benchmark pods.
+        self.filter = None
 
     # def load_smiles_from_file(self, file_name):
     #     with open(file_name) as f:
@@ -329,6 +331,5 @@ class BaseOptimizer:
             self.log_result()
         self.save_result(self.oracle.task_label)
         self.reset()
-
 
 
