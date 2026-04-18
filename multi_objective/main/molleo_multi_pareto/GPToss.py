@@ -28,15 +28,7 @@ load_dotenv()
 
 LLM_BASE_URL = os.getenv("MOLLEO_LLM_BASE_URL", "https://gpt-oss-120b-andrew.nrp-nautilus.io/v1")
 LLM_API_KEY = os.getenv("OSS_KEY") or os.getenv("CLIENT_API_KEY")
-LLM_TIMEOUT_SEC = float(os.getenv("MOLLEO_LLM_TIMEOUT_SEC", "90"))
-LLM_MAX_RETRIES = int(os.getenv("MOLLEO_LLM_MAX_RETRIES", "0"))
-LLM_ATTEMPTS = int(os.getenv("MOLLEO_LLM_ATTEMPTS", "2"))
-client = OpenAI(
-    base_url=LLM_BASE_URL,
-    api_key=LLM_API_KEY,
-    timeout=LLM_TIMEOUT_SEC,
-    max_retries=LLM_MAX_RETRIES,
-)
+client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
 
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Crippen, rdMolDescriptors
@@ -1199,7 +1191,6 @@ def run_agent(
     return state
 
 def query_LLM(messages, index):
-    print(f"[Index {str(index)}] [LLM] query start (timeout={LLM_TIMEOUT_SEC}s)", flush=True)
     response = client.responses.create(
         model='gpt-oss-120b',
         input=messages,
@@ -1312,12 +1303,8 @@ class GPToss:
                         tu += "\n"
                     mol_tuple = mol_tuple + tu
                 objective += mol_tuple
-                for i in range(max(1, LLM_ATTEMPTS)):
+                for i in range(10):
                     try:
-                        print(
-                            f"[Index {str(idx)}] [LLM] tool-agent attempt {i+1}/{max(1, LLM_ATTEMPTS)}",
-                            flush=True,
-                        )
                         # state = run_agent(parent_smiles[0], task_objective, max_steps=20, index=idx)
                         state = run_agent(
                             initial_smiles=parent_smiles,
@@ -1328,7 +1315,7 @@ class GPToss:
                         proposed_smiles = state.current_smiles
                         break
                     except Exception as e:
-                        print(f"[Index {str(idx)}] [LLM] tool-agent attempt failed: {e}", flush=True)
+                        print(e)
                         continue
             else:
                 #original prompt
@@ -1379,16 +1366,12 @@ class GPToss:
                     
                 print(f"[Index {str(idx)}] Prompt: " + prompt, flush=True)
                 messages = [{"role": "user", "content": prompt}]
-                for i in range(max(1, LLM_ATTEMPTS)):
+                for i in range(10):
                     try:
-                        print(
-                            f"[Index {str(idx)}] [LLM] text attempt {i+1}/{max(1, LLM_ATTEMPTS)}",
-                            flush=True,
-                        )
                         r = query_LLM(messages, idx)
                         break
                     except Exception as e:
-                        print(f"[Index {str(idx)}] [LLM] text attempt failed: {e}", flush=True)
+                        print(e)
                         continue
                 proposed_smiles = re.search(r'\\box\{(.*?)\}', r).group(1)
                 proposed_smiles = proposed_smiles.replace('"', '')
