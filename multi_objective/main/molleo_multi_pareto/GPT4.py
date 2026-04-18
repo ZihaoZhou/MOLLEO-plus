@@ -19,8 +19,19 @@ import sascorer
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("GPT_KEY"))
+client = None
 # client = OpenAI(base_url="https://gpt-oss-120b-svarambally.nrp-nautilus.io/v1", api_key=os.getenv("OSS_KEY"))
+
+
+def _get_client():
+    global client
+    if client is not None:
+        return client
+    api_key = os.getenv("GPT_KEY")
+    if not api_key:
+        raise RuntimeError("GPT_KEY is required only when --mol_lm GPT-4 is selected")
+    client = OpenAI(api_key=api_key)
+    return client
 
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Crippen, rdMolDescriptors
@@ -582,7 +593,7 @@ def run_agent(
     should_break = False
     for step in range(max_steps):
         print(f"\nCURRENT MESSAGES: {str(messages)}\n")
-        response = client.responses.create(
+        response = _get_client().responses.create(
             model='gpt-4.1-mini',
             input=messages,
             tools=TOOL_SCHEMAS
@@ -658,7 +669,7 @@ def query_LLM(messages, model="gpt-4.1-mini", temperature=0.0):
 
     for retry in range(3):
         try:
-            obj = client.chat.completions.create(**params)
+            obj = _get_client().chat.completions.create(**params)
             response = obj.choices[0].message.content
             message.append({"role": "assistant", "content": response})
             break
